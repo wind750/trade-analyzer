@@ -7,7 +7,7 @@ import io
 
 # --- 網頁基本設定 ---
 st.set_page_config(
-    page_title="交易損益分析工具 v7.1",
+    page_title="交易損益分析工具 v7.3",
     page_icon="📊",
     layout="wide"
 )
@@ -25,32 +25,18 @@ for font_path in font_paths:
 plt.rcParams['font.sans-serif'] = [CHINESE_FONT, 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
-# --- ★★★ v7.1 修正：MDD 函式現在接收「總權益曲線」 ★★★ ---
+# --- v7.1 MDD 輔助函式 (邏輯不變) ---
 def calculate_drawdown_info(equity_curve_series):
-    """
-    計算最大回檔(MDD)和水下圖數據
-    :param equity_curve_series: 包含初始資金的「總權益」 pandas Series
-    :return: (最大回檔金額, 最大回檔百分比, 水下圖 Series)
-    """
-    # 1. 計算歷史最高點 (High Water Mark)
     peak = equity_curve_series.expanding(min_periods=1).max()
-    
-    # 2. 計算回檔金額 (Drawdown)
     drawdown = peak - equity_curve_series
-    
-    # 3. 計算回檔百分比 (Drawdown Percent)
-    # ★ v7.1 修正：分母改為 peak，因為 peak 至少會是 initial_capital，不會是 0
     drawdown_percent = (drawdown / peak).fillna(0)
-    
-    # 4. 找出最大值
     max_drawdown_value = drawdown.max()
     max_drawdown_percent = drawdown_percent.max()
-    
     return max_drawdown_value, max_drawdown_percent, drawdown
 
 # --- 蒙地卡羅模擬函式 (邏輯不變) ---
 @st.cache_data
-def run_monte_carlo_simulation(pnl_series, n_simulations=500, n_trades=None):
+def run_monte_carlo_simulation(pnl_series, n_simulations=1000, n_trades=None): # 預設值可改
     if n_trades is None:
         n_trades = len(pnl_series)
     pnl_array = pnl_series.to_numpy()
@@ -62,12 +48,12 @@ def run_monte_carlo_simulation(pnl_series, n_simulations=500, n_trades=None):
     final_equities = sim_df.iloc[-1, :]
     return sim_df, final_equities
 
-# --- 夏普與風報比計算函式 (邏輯不變) ---
+# --- v7.2 夏普與風報比計算函式 (邏輯不變) ---
 def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     df = df.sort_values(by=date_col)
     daily_pnl = df.groupby(date_col)[pnl_col].sum()
     if daily_pnl.empty:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, 0.0 # Sharpe, Sortino, EquityCurve, Volatility
 
     idx = pd.date_range(start=daily_pnl.index.min(), end=daily_pnl.index.max())
     daily_pnl = daily_pnl.reindex(idx, fill_value=0)
@@ -76,6 +62,8 @@ def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     daily_returns = equity_curve.pct_change().fillna(0)
     
     std_dev = daily_returns.std()
+    annualized_volatility = std_dev * np.sqrt(252)
+    
     if std_dev == 0:
         sharpe_ratio = 0.0
     else:
@@ -89,13 +77,14 @@ def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     else:
         sortino_ratio = (daily_returns.mean() / downside_std) * np.sqrt(252)
         
-    return sharpe_ratio, sortino_ratio, equity_curve
+    return sharpe_ratio, sortino_ratio, equity_curve, annualized_volatility
 
 
-# --- 個股報表分析函式 (v7.1) ---
+# --- 個股報表分析函式 (v7.3) ---
 def analyze_stock_data(df, initial_capital):
     
     st.header("1. 資料清理與預覽 (個股報表)")
+    # ... (清理邏輯不變) ...
     df_cleaned = df.copy()
     df_cleaned.columns = df_cleaned.columns.str.strip().str.replace('"', '').str.strip()
     required_cols = ['交易日期', '股票名稱', '損益金額', '序號', '報酬率']
@@ -120,12 +109,11 @@ def analyze_stock_data(df, initial_capital):
 
     # --- 2. 總體統計報告 ---
     st.header("2. 總體統計報告 (個股)")
-    
+    # ... (統計邏輯不變) ...
     pnl_events_df = df_cleaned[df_cleaned['損益金額'] != 0]
     total_trades = int(df_cleaned['序號'].max()) if not df_cleaned['序號'].dropna().empty else len(pnl_events_df)
     profitable_trades = pnl_events_df[pnl_events_df['損益金額'] > 0]
     losing_trades = pnl_events_df[pnl_events_df['損益金額'] < 0]
-    
     num_winning_trades = len(profitable_trades)
     num_losing_trades = len(losing_trades)
     win_rate = (num_winning_trades / len(pnl_events_df)) * 100 if not pnl_events_df.empty else 0
@@ -137,16 +125,12 @@ def analyze_stock_data(df, initial_capital):
     profit_factor = total_profit_from_wins / total_loss_from_losses if total_loss_from_losses > 0 else float('inf')
     avg_return_rate = df_cleaned['報酬率'].mean() * 100
     
-    # ★ v7.1 修正：MDD 計算改在 Sharpe 之後
-    sharpe, sortino, equity_curve = calculate_risk_metrics(df_cleaned, '交易日期', '損益金額', initial_capital)
-    
+    sharpe, sortino, equity_curve, volatility = calculate_risk_metrics(df_cleaned, '交易日期', '損益金額', initial_capital)
     if equity_curve is None:
         st.error("無有效數據可計算風險指標。")
         return
-        
     mdd_val, mdd_pct, underwater_series = calculate_drawdown_info(equity_curve)
 
-    # ... (指標顯示邏輯不變) ...
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("總淨損益", f"${total_net_pnl:,.0f}")
     col2.metric("總交易筆數", f"{total_trades} 筆")
@@ -157,16 +141,22 @@ def analyze_stock_data(df, initial_capital):
     col2.metric("虧損交易次數", f"{num_losing_trades} 次")
     col3.metric("平均獲利", f"${avg_win:,.0f}")
     col4.metric("平均虧損", f"${avg_loss:,.0f}")
+    
     st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("風險與報酬分析")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
+    col2.metric("風報比 (Sortino)", f"{sortino:.2f}")
+    col3.metric("年化波動率", f"{volatility * 100:.2f}%")
+    col1, col2, col3 = st.columns(3)
     col1.metric("最大回檔 (金額)", f"${mdd_val:,.0f}")
-    col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%") # <-- 這裡現在會顯示正確
-    col3.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
-    col4.metric("風報比 (Sortino)", f"{sortino:.2f}")
-    st.markdown("---")
-
+    col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%")
+    col3.metric("平均報酬率", f"{avg_return_rate:.2f}%")
+    
     # --- 3. 視覺化圖表分析 ---
+    st.markdown("---")
     st.header("3. 視覺化圖表分析")
+    # ... (圖表邏輯不變) ...
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("每日淨損益")
@@ -192,11 +182,11 @@ def analyze_stock_data(df, initial_capital):
     # --- 4. 深度圖表分析 ---
     st.markdown("---")
     st.header("4. 深度圖表分析")
+    # ... (圖表邏輯不變) ...
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("水下圖 (資產回檔)")
         fig3, ax3 = plt.subplots(figsize=(10, 6))
-        # ★ v7.1 修正：使用 underwater_series 的索引 (日期)
         ax3.fill_between(underwater_series.index, -underwater_series, 0, facecolor='red', alpha=0.7)
         ax3.set_title("水下圖 (Drawdown)")
         ax3.set_ylabel("回檔金額 ($)")
@@ -217,6 +207,7 @@ def analyze_stock_data(df, initial_capital):
     # --- 5. 詳細數據分析 ---
     st.markdown("---")
     st.header("5. 詳細數據分析")
+    # ... (邏輯不變) ...
     pnl_by_product = df_cleaned.groupby('股票名稱')['損益金額'].sum().sort_values(ascending=False).reset_index()
     st.subheader("各股票損益排名")
     st.dataframe(pnl_by_product[pnl_by_product['損益金額'] != 0])
@@ -225,16 +216,19 @@ def analyze_stock_data(df, initial_capital):
     st.markdown("---")
     st.header("6. 蒙地卡羅模擬 (策略穩健性分析)")
     mc_pnl_source = pnl_events_df['損益金額']
-    # ★ v7.1 修正：這裡的交易次數用 pnl_events_df 比較準
     mc_trade_count = len(pnl_events_df) 
     real_curve = pnl_events_df['損益金額'].cumsum().reset_index(drop=True)
 
     if mc_pnl_source.empty:
         st.warning("沒有足夠的損益數據來執行蒙地卡羅模擬。")
     else:
+        # --- ★★★ v7.3 核心改動 ★★★ ---
         n_sims = st.number_input("請選擇模擬次數：", min_value=100, max_value=5000, value=1000, step=100)
+        # --- ★★★ v7.3 核心改動 ★★★ ---
+        
         if st.button(f"開始執行 {n_sims} 次模擬"):
             with st.spinner(f"正在執行 {n_sims} 次模擬，請稍候..."):
+                # ... (後續模擬邏輯不變) ...
                 sim_df, final_equities = run_monte_carlo_simulation(mc_pnl_source, n_sims, mc_trade_count)
                 st.subheader(f"{n_sims} 次模擬 - 權益曲線")
                 fig5, ax5 = plt.subplots(figsize=(12, 7))
@@ -259,10 +253,11 @@ def analyze_stock_data(df, initial_capital):
                 else:
                     st.warning("您的原始績效落入 5% 的最差結果中，策略可能存在風險或運氣不佳。")
 
-# --- 期貨報表分析函式 (v7.1) ---
+# --- 期貨報表分析函式 (v7.3) ---
 def analyze_futures_data(df, initial_capital):
     
     st.header("1. 資料清理與預覽 (期貨報表)")
+    # ... (清理邏輯不變) ...
     df_cleaned = df.copy()
     df_cleaned.columns = df_cleaned.columns.str.strip().str.replace('"', '').str.strip()
     required_cols = ['交易日期', '商品名稱', '筆數', '淨損益']
@@ -289,7 +284,7 @@ def analyze_futures_data(df, initial_capital):
 
     # --- 2. 總體統計報告 ---
     st.header("2. 總體統計報告 (期貨)")
-    
+    # ... (統計邏輯不變) ...
     pnl_events_df = df_cleaned[df_cleaned['淨損益'] != 0]
     total_trades = int(df_cleaned['筆數'].max()) if not df_cleaned['筆數'].dropna().empty else 0
     profitable_trades = pnl_events_df[pnl_events_df['淨損益'] > 0]
@@ -304,16 +299,12 @@ def analyze_futures_data(df, initial_capital):
     avg_loss = total_loss_from_losses / num_losing_trades if num_losing_trades > 0 else 0
     profit_factor = total_profit_from_wins / total_loss_from_losses if total_loss_from_losses > 0 else float('inf')
     
-    # ★ v7.1 修正：MDD 計算改在 Sharpe 之後
-    sharpe, sortino, equity_curve = calculate_risk_metrics(df_cleaned, '交易日期', '淨損益', initial_capital)
-
+    sharpe, sortino, equity_curve, volatility = calculate_risk_metrics(df_cleaned, '交易日期', '淨損益', initial_capital)
     if equity_curve is None:
         st.error("無有效數據可計算風險指標。")
         return
-        
     mdd_val, mdd_pct, underwater_series = calculate_drawdown_info(equity_curve)
 
-    # ... (指標顯示邏輯不變) ...
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("總淨損益", f"${total_net_pnl:,.0f}")
     col2.metric("總交易筆數", f"{total_trades} 筆")
@@ -324,16 +315,21 @@ def analyze_futures_data(df, initial_capital):
     col2.metric("虧損交易次數", f"{num_losing_trades} 次")
     col3.metric("平均獲利", f"${avg_win:,.0f}")
     col4.metric("平均虧損", f"${avg_loss:,.0f}")
+    
     st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("風險與報酬分析")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
+    col2.metric("風報比 (Sortino)", f"{sortino:.2f}")
+    col3.metric("年化波動率", f"{volatility * 100:.2f}%")
+    col1, col2 = st.columns(3)
     col1.metric("最大回檔 (金額)", f"${mdd_val:,.0f}")
-    col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%") # <-- 這裡現在會顯示正確
-    col3.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
-    col4.metric("風報比 (Sortino)", f"{sortino:.2f}")
-    st.markdown("---")
-
+    col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%")
+    
     # --- 3. 視覺化圖表分析 ---
+    st.markdown("---")
     st.header("3. 視覺化圖表分析")
+    # ... (圖表邏輯不變) ...
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("每日淨損益")
@@ -359,11 +355,11 @@ def analyze_futures_data(df, initial_capital):
     # --- 4. 深度圖表分析 ---
     st.markdown("---")
     st.header("4. 深度圖表分析")
+    # ... (圖表邏輯不變) ...
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("水下圖 (資產回檔)")
         fig3, ax3 = plt.subplots(figsize=(10, 6))
-        # ★ v7.1 修正：使用 underwater_series 的索引 (日期)
         ax3.fill_between(underwater_series.index, -underwater_series, 0, facecolor='red', alpha=0.7)
         ax3.set_title("水下圖 (Drawdown)")
         ax3.set_ylabel("回檔金額 ($)")
@@ -384,6 +380,7 @@ def analyze_futures_data(df, initial_capital):
     # --- 5. 詳細數據分析 ---
     st.markdown("---")
     st.header("5. 詳細數據分析")
+    # ... (邏輯不變) ...
     pnl_by_product = df_cleaned.groupby('商品名稱')['淨損益'].sum().sort_values(ascending=False).reset_index()
     st.subheader("各商品損益排名")
     st.dataframe(pnl_by_product[pnl_by_product['淨損益'] != 0])
@@ -399,9 +396,13 @@ def analyze_futures_data(df, initial_capital):
     if mc_pnl_source.empty:
         st.warning("沒有足夠的損益數據來執行蒙地卡羅模擬。")
     else:
+        # --- ★★★ v7.3 核心改動 ★★★ ---
         n_sims = st.number_input("請選擇模擬次數：", min_value=100, max_value=5000, value=1000, step=100)
+        # --- ★★★ v7.3 核心改動 ★★★ ---
+        
         if st.button(f"開始執行 {n_sims} 次模擬"):
             with st.spinner(f"正在執行 {n_sims} 次模擬，請稍候..."):
+                # ... (後續模擬邏輯不變) ...
                 sim_df, final_equities = run_monte_carlo_simulation(mc_pnl_source, n_sims, mc_trade_count)
                 st.subheader(f"{n_sims} 次模擬 - 權益曲線")
                 fig5, ax5 = plt.subplots(figsize=(12, 7))
@@ -422,12 +423,12 @@ def analyze_futures_data(df, initial_capital):
                 col2.metric("模擬中位數", f"${median_final:,.0f}")
                 col3.metric("5% 最差結存", f"${pct_5:,.0f}")
                 if real_final_pnl > pct_5:
-                    st.success("您的原始績效優於 95% 的隨機模擬結果，策略可能具有優勢！")
+                    st.success("您的原始績F績優於 95% 的隨機模擬結果，策略可能具有優勢！")
                 else:
                     st.warning("您的原始績效落入 5% 的最差結果中，策略可能存在風險或運氣不佳。")
 
-# --- 網頁主體 v7.1 (與 v7.0 邏輯相同) ---
-st.title("📊 交易損益分析工具 v7.1 (專業版)")
+# --- 網頁主體 v7.3 (與 v7.2 邏輯相同) ---
+st.title("📊 交易損益分析工具 v7.3 (專業版)")
 
 st.subheader("1. 設定與報表類型：")
 
