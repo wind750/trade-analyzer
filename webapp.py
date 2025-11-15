@@ -238,7 +238,7 @@ def analyze_stock_data(df, initial_capital):
     if mc_pnl_source.empty:
         st.warning("沒有足夠的損益數據來執行蒙地卡羅模擬。")
     else:
-        n_sims = st.number_input("請選擇模擬次數：", min_value=100, max_value=5000, value=500, step=100)
+        n_sims = st.number_input("請選擇模擬次數：", min_value=100, max_value=5000, value=1000, step=100)
         if st.button(f"開始執行 {n_sims} 次模擬"):
             with st.spinner(f"正在執行 {n_sims} 次模擬，請稍候..."):
                 sim_df, final_equities = run_monte_carlo_simulation(mc_pnl_source, n_sims, mc_trade_count)
