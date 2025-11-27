@@ -7,7 +7,7 @@ import io
 
 # --- 網頁基本設定 ---
 st.set_page_config(
-    page_title="交易損益分析工具 v7.4",
+    page_title="交易損益分析工具 v7.5",
     page_icon="📊",
     layout="wide"
 )
@@ -80,7 +80,7 @@ def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     return sharpe_ratio, sortino_ratio, equity_curve, annualized_volatility
 
 
-# --- 個股報表分析函式 (v7.4) ---
+# --- 個股報表分析函式 (v7.5) ---
 def analyze_stock_data(df, initial_capital):
     
     st.header("1. 資料清理與預覽 (個股報表)")
@@ -151,7 +151,7 @@ def analyze_stock_data(df, initial_capital):
     col2.metric("風報比 (Sortino)", f"{sortino:.2f}")
     col3.metric("年化波動率", f"{volatility * 100:.2f}%")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("最大回檔 (金額)", f"${mdd_val:,.0f}")
     col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%")
     col3.metric("平均報酬率", f"{avg_return_rate:.2f}%")
@@ -250,7 +250,7 @@ def analyze_stock_data(df, initial_capital):
                 else:
                     st.warning("您的原始績效落入 5% 的最差結果中，策略可能存在風險或運氣不佳。")
 
-# --- 期貨報表分析函式 (v7.4 修正) ---
+# --- 期貨報表分析函式 (v7.5) ---
 def analyze_futures_data(df, initial_capital):
     
     st.header("1. 資料清理與預覽 (期貨報表)")
@@ -321,8 +321,7 @@ def analyze_futures_data(df, initial_capital):
     col2.metric("風報比 (Sortino)", f"{sortino:.2f}")
     col3.metric("年化波動率", f"{volatility * 100:.2f}%")
 
-    # ★★★ v7.4 修正點：從 st.columns(3) 改為 st.columns(2) ★★★
-    col1, col2 = st.columns(2) 
+    col1, col2 = st.columns(2)
     col1.metric("最大回檔 (金額)", f"${mdd_val:,.0f}")
     col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%")
     
@@ -369,4 +368,113 @@ def analyze_futures_data(df, initial_capital):
         st.subheader("報酬分佈直方圖")
         pnl_data = pnl_events_df['淨損益']
         fig4, ax4 = plt.subplots(figsize=(10, 6))
-        ax4.hist(pnl_data, bins
+        ax4.hist(pnl_data, bins=50, color='blue', alpha=0.7, edgecolor='black')
+        ax4.set_title("損益分佈")
+        ax4.set_xlabel("損益金額 ($)")
+        ax4.set_ylabel("次數")
+        ax4.grid(axis='y', linestyle='--')
+        st.pyplot(fig4)
+        
+    # --- 5. 詳細數據 ---
+    st.markdown("---")
+    st.header("5. 詳細數據分析")
+    pnl_by_product = df_cleaned.groupby('商品名稱')['淨損益'].sum().sort_values(ascending=False).reset_index()
+    st.subheader("各商品損益排名")
+    st.dataframe(pnl_by_product[pnl_by_product['淨損益'] != 0])
+    
+    # --- 6. 蒙地卡羅 ---
+    st.markdown("---")
+    st.header("6. 蒙地卡羅模擬 (策略穩健性分析)")
+    mc_pnl_source = pnl_events_df['淨損益']
+    mc_trade_count = len(pnl_events_df) 
+    real_curve = pnl_events_df['淨損益'].cumsum().reset_index(drop=True)
+    real_final_pnl = real_curve.iloc[-1]
+
+    if mc_pnl_source.empty:
+        st.warning("沒有足夠的損益數據來執行蒙地卡羅模擬。")
+    else:
+        n_sims = st.number_input("請選擇模擬次數：", min_value=100, max_value=5000, value=1000, step=100)
+        if st.button(f"開始執行 {n_sims} 次模擬"):
+            with st.spinner(f"正在執行 {n_sims} 次模擬，請稍候..."):
+                sim_df, final_equities = run_monte_carlo_simulation(mc_pnl_source, n_sims, mc_trade_count)
+                st.subheader(f"{n_sims} 次模擬 - 權益曲線")
+                fig5, ax5 = plt.subplots(figsize=(12, 7))
+                ax5.plot(sim_df, color='lightblue', alpha=0.1)
+                ax5.plot(real_curve, color='red', linewidth=2, label=f"原始績效 (結存: ${total_net_pnl:,.0f})")
+                ax5.set_title("蒙地卡羅模擬 vs 原始績效")
+                ax5.set_xlabel("交易次數")
+                ax5.set_ylabel("累積損益 ($)")
+                ax5.legend()
+                ax5.grid(True, linestyle='--')
+                st.pyplot(fig5)
+                
+                st.subheader("模擬統計")
+                median_final = final_equities.median()
+                pct_5 = final_equities.quantile(0.05)
+                col1, col2, col3 = st.columns(3)
+                col1.metric("原始結存", f"${total_net_pnl:,.0f}")
+                col2.metric("模擬中位數", f"${median_final:,.0f}")
+                col3.metric("5% 最差結存", f"${pct_5:,.0f}")
+                if total_net_pnl > pct_5:
+                    st.success("您的原始績效優於 95% 的隨機模擬結果，策略可能具有優勢！")
+                else:
+                    st.warning("您的原始績效落入 5% 的最差結果中，策略可能存在風險或運氣不佳。")
+
+# --- 網頁主體 v7.5 (與 v7.4 邏輯相同) ---
+st.title("📊 交易損益分析工具 v7.5 (專業版)")
+
+st.subheader("1. 設定與報表類型：")
+
+col1, col2 = st.columns([1, 2])
+with col1:
+    initial_capital = st.number_input("請輸入初始資金 (元)", min_value=10000, value=3000000, step=10000)
+with col2:
+    report_type = st.radio(
+        "選擇報表類型",
+        ["個股交易報表 (已總結)", "期貨交易報表 (逐筆)"],
+        horizontal=True
+    )
+
+st.markdown("---")
+
+st.subheader("2. 請上傳您的 Excel 或 CSV 報表：")
+uploaded_file = st.file_uploader(
+    "選擇一個 Excel 或 CSV 檔案",
+    type=["xlsx", "xls", "csv"],
+    label_visibility="collapsed"
+)
+
+if uploaded_file is not None:
+    try:
+        dataframe = None 
+        if uploaded_file.name.endswith('.csv'):
+            uploaded_file.seek(0)
+            try:
+                dataframe = pd.read_csv(uploaded_file, encoding='utf-8')
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                try:
+                    dataframe = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+                except UnicodeDecodeError:
+                    uploaded_file.seek(0)
+                    try:
+                        dataframe = pd.read_csv(uploaded_file, encoding='cp950')
+                    except UnicodeDecodeError:
+                        uploaded_file.seek(0)
+                        dataframe = pd.read_csv(uploaded_file, encoding='big5')
+        else:
+            dataframe = pd.read_excel(uploaded_file)
+        
+        st.markdown("---")
+        
+        if dataframe is None:
+            st.error("讀取檔案失敗。所有嘗試的編碼 (UTF-8, UTF-8-sig, CP950, Big5) 都失敗了。")
+        else:
+            if report_type == "個股交易報表 (已總結)":
+                analyze_stock_data(dataframe, initial_capital)
+            else:
+                analyze_futures_data(dataframe, initial_capital)
+            
+    except Exception as e:
+        st.error(f"讀取或分析檔案時發生錯誤：{e}")
+        st.error(f"請確認您的檔案為標準格式，且選擇了正確的報表類型。錯誤詳情：{e}")
