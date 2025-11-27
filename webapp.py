@@ -7,7 +7,7 @@ import io
 
 # --- 網頁基本設定 ---
 st.set_page_config(
-    page_title="交易損益分析工具 v7.5",
+    page_title="交易損益分析工具 v7.6",
     page_icon="📊",
     layout="wide"
 )
@@ -25,7 +25,7 @@ for font_path in font_paths:
 plt.rcParams['font.sans-serif'] = [CHINESE_FONT, 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
-# --- v7.1 MDD 輔助函式 ---
+# --- MDD 輔助函式 ---
 def calculate_drawdown_info(equity_curve_series):
     peak = equity_curve_series.expanding(min_periods=1).max()
     drawdown = peak - equity_curve_series
@@ -48,7 +48,7 @@ def run_monte_carlo_simulation(pnl_series, n_simulations=1000, n_trades=None):
     final_equities = sim_df.iloc[-1, :]
     return sim_df, final_equities
 
-# --- v7.2 夏普與風報比計算函式 ---
+# --- 夏普與風報比計算函式 ---
 def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     df = df.sort_values(by=date_col)
     daily_pnl = df.groupby(date_col)[pnl_col].sum()
@@ -80,9 +80,8 @@ def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     return sharpe_ratio, sortino_ratio, equity_curve, annualized_volatility
 
 
-# --- 個股報表分析函式 (v7.5) ---
+# --- 個股報表分析函式 (v7.6) ---
 def analyze_stock_data(df, initial_capital):
-    
     st.header("1. 資料清理與預覽 (個股報表)")
     df_cleaned = df.copy()
     df_cleaned.columns = df_cleaned.columns.str.strip().str.replace('"', '').str.strip()
@@ -109,13 +108,19 @@ def analyze_stock_data(df, initial_capital):
     # --- 2. 總體統計報告 ---
     st.header("2. 總體統計報告 (個股)")
     pnl_events_df = df_cleaned[df_cleaned['損益金額'] != 0]
-    total_trades = int(df_cleaned['序號'].max()) if not df_cleaned['序號'].dropna().empty else len(pnl_events_df)
+    
+    # ★ v7.6 修正：使用 nunique() 計算不重複的序號數量，避免跳號導致虛胖
+    total_trades = df_cleaned['序號'].nunique()
+    
     profitable_trades = pnl_events_df[pnl_events_df['損益金額'] > 0]
     losing_trades = pnl_events_df[pnl_events_df['損益金額'] < 0]
     
     num_winning_trades = len(profitable_trades)
     num_losing_trades = len(losing_trades)
-    win_rate = (num_winning_trades / len(pnl_events_df)) * 100 if not pnl_events_df.empty else 0
+    # 勝率分母改為實際有損益的交易總數 (獲利+虧損)
+    realized_trades_count = num_winning_trades + num_losing_trades
+    win_rate = (num_winning_trades / realized_trades_count) * 100 if realized_trades_count > 0 else 0
+    
     total_net_pnl = df_cleaned['損益金額'].sum()
     total_profit_from_wins = profitable_trades['損益金額'].sum()
     total_loss_from_losses = abs(losing_trades['損益金額'].sum())
@@ -144,17 +149,19 @@ def analyze_stock_data(df, initial_capital):
     col4.metric("平均虧損", f"${avg_loss:,.0f}")
     
     st.markdown("---")
-    
     st.subheader("風險與報酬分析")
-    col1, col2, col3 = st.columns(3)
+    
+    # ★ v7.6 優化排版：第一排 4 個指標
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
     col2.metric("風報比 (Sortino)", f"{sortino:.2f}")
     col3.metric("年化波動率", f"{volatility * 100:.2f}%")
+    col4.metric("平均報酬率", f"{avg_return_rate:.2f}%")
 
+    # ★ v7.6 優化排版：第二排 2 個回檔指標
     col1, col2 = st.columns(2)
     col1.metric("最大回檔 (金額)", f"${mdd_val:,.0f}")
     col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%")
-    col3.metric("平均報酬率", f"{avg_return_rate:.2f}%")
     
     st.markdown("---")
 
@@ -250,7 +257,7 @@ def analyze_stock_data(df, initial_capital):
                 else:
                     st.warning("您的原始績效落入 5% 的最差結果中，策略可能存在風險或運氣不佳。")
 
-# --- 期貨報表分析函式 (v7.5) ---
+# --- 期貨報表分析函式 (v7.6) ---
 def analyze_futures_data(df, initial_capital):
     
     st.header("1. 資料清理與預覽 (期貨報表)")
@@ -281,12 +288,19 @@ def analyze_futures_data(df, initial_capital):
     # --- 2. 總體統計報告 ---
     st.header("2. 總體統計報告 (期貨)")
     pnl_events_df = df_cleaned[df_cleaned['淨損益'] != 0]
-    total_trades = int(df_cleaned['筆數'].max()) if not df_cleaned['筆數'].dropna().empty else 0
+    
+    # ★ v7.6 修正：使用 nunique() 計算不重複的筆數編號，解決虛胖問題
+    total_trades = df_cleaned['筆數'].nunique()
+    
     profitable_trades = pnl_events_df[pnl_events_df['淨損益'] > 0]
     losing_trades = pnl_events_df[pnl_events_df['淨損益'] < 0]
     num_winning_trades = len(profitable_trades)
     num_losing_trades = len(losing_trades)
-    win_rate = (num_winning_trades / len(pnl_events_df)) * 100 if not pnl_events_df.empty else 0
+    
+    # 勝率分母改為實際有損益的交易總數
+    realized_trades_count = num_winning_trades + num_losing_trades
+    win_rate = (num_winning_trades / realized_trades_count) * 100 if realized_trades_count > 0 else 0
+    
     total_net_pnl = df_cleaned['淨損益'].sum()
     total_profit_from_wins = profitable_trades['淨損益'].sum()
     total_loss_from_losses = abs(losing_trades['淨損益'].sum())
@@ -314,13 +328,19 @@ def analyze_futures_data(df, initial_capital):
     col4.metric("平均虧損", f"${avg_loss:,.0f}")
     
     st.markdown("---")
-    
     st.subheader("風險與報酬分析")
-    col1, col2, col3 = st.columns(3)
+    
+    # ★ v7.6 優化排版：第一排 4 個指標 (加入平均報酬率來填補空缺)
+    # 註：期貨報表沒有直接的'報酬率'欄位，我們可以用 總損益/初始資金 算一個簡單的總報酬率
+    total_return_rate = (total_net_pnl / initial_capital) * 100
+    
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
     col2.metric("風報比 (Sortino)", f"{sortino:.2f}")
     col3.metric("年化波動率", f"{volatility * 100:.2f}%")
+    col4.metric("總報酬率 (Total Return)", f"{total_return_rate:.2f}%") # 期貨版用總報酬率填補
 
+    # ★ v7.6 優化排版：第二排 2 個回檔指標
     col1, col2 = st.columns(2)
     col1.metric("最大回檔 (金額)", f"${mdd_val:,.0f}")
     col2.metric("最大回檔 (%)", f"{mdd_pct * 100:.2f}%")
@@ -388,7 +408,6 @@ def analyze_futures_data(df, initial_capital):
     mc_pnl_source = pnl_events_df['淨損益']
     mc_trade_count = len(pnl_events_df) 
     real_curve = pnl_events_df['淨損益'].cumsum().reset_index(drop=True)
-    real_final_pnl = real_curve.iloc[-1]
 
     if mc_pnl_source.empty:
         st.warning("沒有足夠的損益數據來執行蒙地卡羅模擬。")
@@ -420,8 +439,8 @@ def analyze_futures_data(df, initial_capital):
                 else:
                     st.warning("您的原始績效落入 5% 的最差結果中，策略可能存在風險或運氣不佳。")
 
-# --- 網頁主體 v7.5 (與 v7.4 邏輯相同) ---
-st.title("📊 交易損益分析工具 v7.5 (專業版)")
+# --- 網頁主體 v7.6 (與 v7.5 邏輯相同) ---
+st.title("📊 交易損益分析工具 v7.6 (專業版)")
 
 st.subheader("1. 設定與報表類型：")
 
