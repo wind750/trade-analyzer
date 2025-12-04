@@ -437,7 +437,8 @@ if mode == "單一報表分析 (MC風格)":
 else: # 最佳化模式
     st.subheader("2. 批次上傳多個回測 CSV")
     st.info("💡 提示：請將檔名命名為 `參數1_參數2.csv` (例如 `MA_60.csv` 或 `MA60_Stop20.csv`)，程式會自動抓取數字作為參數。")
-    files = st.file_uploader("選擇多個檔案 (可拖曳)", type=["csv"], accept_multiple_files=True)
+    files = st.file_uploader("選擇多個檔案 (可拖曳)", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
     
     if files:
         analyze_optimization_batch(files, initial_capital)
+
