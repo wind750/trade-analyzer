@@ -4,17 +4,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import io
+import re
+import os
 
-# --- 網頁基本設定 ---
+# ==========================================
+# 0. 網頁與環境設定
+# ==========================================
 st.set_page_config(
-    page_title="交易損益分析工具 v8.0 (MC風格版)",
+    page_title="交易損益分析工具 v9.0 (最佳化版)",
     page_icon="📊",
     layout="wide"
 )
 
-# --- 圖表中文設定 ---
+# 設定中文字體 (避免圖表亂碼)
 font_paths = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-CHINESE_FONT = 'Microsoft JhengHei'
+CHINESE_FONT = 'Microsoft JhengHei' # 預設微軟正黑體
 for font_path in font_paths:
     if 'msjh.ttc' in font_path or 'msjh.ttf' in font_path:
         CHINESE_FONT = 'Microsoft JhengHei'
@@ -25,73 +29,70 @@ for font_path in font_paths:
 plt.rcParams['font.sans-serif'] = [CHINESE_FONT, 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
-# --- 輔助函式：計算最大回檔 ---
+# ==========================================
+# 1. 核心計算函式庫
+# ==========================================
+
 def calculate_drawdown_info(equity_curve_series):
+    """計算最大回檔 (MDD)"""
     peak = equity_curve_series.expanding(min_periods=1).max()
     drawdown = peak - equity_curve_series
-    # 分母為 peak，避免除以 0
     drawdown_percent = (drawdown / peak).fillna(0)
     max_drawdown_value = drawdown.max()
     max_drawdown_percent = drawdown_percent.max()
     return max_drawdown_value, max_drawdown_percent, drawdown
 
-# --- 輔助函式：計算連勝與連敗 ---
 def calculate_consecutive(pnl_series):
-    if pnl_series.empty:
-        return 0, 0
-    
-    # 建立一個布林序列：賺錢為 True, 賠錢為 False
+    """計算最大連勝與連敗次數"""
+    if pnl_series.empty: return 0, 0
     is_win = pnl_series > 0
-    
-    # 計算連續次數
-    # 邏輯：比較當前與前一個是否不同，不同時產生新的群組編號，再計算每個群組的長度
     groups = is_win.ne(is_win.shift()).cumsum()
     streaks = groups.map(groups.value_counts())
-    
-    # 分別找出勝和敗的最大連續次數
-    max_consecutive_wins = streaks[is_win].max() if not streaks[is_win].empty else 0
-    max_consecutive_losses = streaks[~is_win].max() if not streaks[~is_win].empty else 0
-    
-    return int(max_consecutive_wins), int(max_consecutive_losses)
+    max_wins = streaks[is_win].max() if not streaks[is_win].empty else 0
+    max_losses = streaks[~is_win].max() if not streaks[~is_win].empty else 0
+    return int(max_wins), int(max_losses)
 
-# --- 蒙地卡羅模擬函式 ---
 @st.cache_data
 def run_monte_carlo_simulation(pnl_series, n_simulations=1000, n_trades=None):
-    if n_trades is None:
-        n_trades = len(pnl_series)
+    """執行蒙地卡羅模擬"""
+    if n_trades is None: n_trades = len(pnl_series)
     pnl_array = pnl_series.to_numpy()
+    # 建立矩陣: 列=交易次數, 欄=模擬次數
     sim_results_matrix = np.zeros((n_trades, n_simulations))
     for i in range(n_simulations):
+        # 隨機重組交易
         random_trades = np.random.choice(pnl_array, size=n_trades, replace=True)
         sim_results_matrix[:, i] = np.cumsum(random_trades)
+    
     sim_df = pd.DataFrame(sim_results_matrix)
-    final_equities = sim_df.iloc[-1, :]
+    final_equities = sim_df.iloc[-1, :] # 取最後一筆作為最終淨值
     return sim_df, final_equities
 
-# --- 夏普與風報比計算函式 ---
 def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
+    """計算夏普比率、風報比、年化波動率與權益曲線"""
     df = df.sort_values(by=date_col)
     daily_pnl = df.groupby(date_col)[pnl_col].sum()
-    if daily_pnl.empty:
-        return 0.0, 0.0, None, 0.0
+    if daily_pnl.empty: return 0.0, 0.0, None, 0.0
 
+    # 補齊非交易日，使時間序列連續
     idx = pd.date_range(start=daily_pnl.index.min(), end=daily_pnl.index.max())
     daily_pnl = daily_pnl.reindex(idx, fill_value=0)
     
+    # 計算權益曲線 (初始資金 + 累計損益)
     equity_curve = initial_capital + daily_pnl.cumsum()
     daily_returns = equity_curve.pct_change().fillna(0)
     
+    # 年化波動率
     std_dev = daily_returns.std()
     annualized_volatility = std_dev * np.sqrt(252)
     
-    if std_dev == 0:
-        sharpe_ratio = 0.0
-    else:
-        sharpe_ratio = (daily_returns.mean() / std_dev) * np.sqrt(252)
+    # 夏普比率 (假設無風險利率為0)
+    if std_dev == 0: sharpe_ratio = 0.0
+    else: sharpe_ratio = (daily_returns.mean() / std_dev) * np.sqrt(252)
         
+    # 風報比 (只看下檔風險)
     downside_returns = daily_returns[daily_returns < 0]
     downside_std = downside_returns.std()
-    
     if downside_std == 0 or pd.isna(downside_std):
         sortino_ratio = float('inf') if daily_returns.mean() > 0 else 0.0
     else:
@@ -99,274 +100,344 @@ def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
         
     return sharpe_ratio, sortino_ratio, equity_curve, annualized_volatility
 
+# ==========================================
+# 2. 資料讀取與前處理
+# ==========================================
 
-# --- 通用分析邏輯 (整合個股與期貨) ---
-def perform_mc_style_analysis(df_cleaned, pnl_col, date_col, trade_count_col, initial_capital, report_name):
+def load_data(uploaded_file):
+    """讀取檔案 (自動嘗試多種 CSV 編碼)"""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            uploaded_file.seek(0)
+            # 常見編碼順序：通用 -> Windows BOM -> 繁體中文(舊) -> 繁體中文(標準)
+            encodings = ['utf-8', 'utf-8-sig', 'cp950', 'big5']
+            for enc in encodings:
+                try:
+                    df = pd.read_csv(uploaded_file, encoding=enc)
+                    uploaded_file.seek(0)
+                    return df
+                except UnicodeDecodeError:
+                    uploaded_file.seek(0)
+                    continue
+            return None
+        else:
+            return pd.read_excel(uploaded_file)
+    except Exception:
+        return None
+
+def preprocess_xq_data(df):
+    """識別並清理 XQ 報表格式 (個股/期貨)"""
+    df.columns = df.columns.str.strip().str.replace('"', '').str.strip()
     
-    # 1. 基礎數據準備
-    pnl_events_df = df_cleaned[df_cleaned[pnl_col] != 0]
-    
-    # 計算交易次數 (期貨用筆數去重，個股用序號去重或直接數列數)
-    if trade_count_col:
-        total_trades = df_cleaned[trade_count_col].nunique()
+    # 自動判斷欄位名稱
+    if '筆數' in df.columns and '淨損益' in df.columns:
+        # 期貨格式
+        date_col, pnl_col, trade_id_col = '交易日期', '淨損益', '筆數'
+    elif '損益金額' in df.columns:
+        # 個股格式 ('序號'可能不存在，若無則用None)
+        date_col, pnl_col = '交易日期', '損益金額'
+        trade_id_col = '序號' if '序號' in df.columns else None
     else:
-        # 如果是個股且沒有序號欄位，可能需要另一種算法，但在這裡假設個股分析函式傳入時已處理好
-        # 為了兼容 v7.6 的邏輯：
-        total_trades = len(pnl_events_df) # 預設回退方案
+        return None, None, None, None
 
-    # 分離獲利與虧損交易
-    profitable_trades = pnl_events_df[pnl_events_df[pnl_col] > 0]
-    losing_trades = pnl_events_df[pnl_events_df[pnl_col] < 0]
+    # 格式轉換
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    df[pnl_col] = pd.to_numeric(df[pnl_col].astype(str).str.strip(), errors='coerce').fillna(0)
     
-    num_winning_trades = len(profitable_trades)
-    num_losing_trades = len(losing_trades)
+    if trade_id_col and trade_id_col in df.columns:
+        df[trade_id_col] = pd.to_numeric(df[trade_id_col].astype(str).str.strip(), errors='coerce')
     
-    # --- 2. MC 關鍵指標計算 ---
+    # 移除無效日期
+    df.dropna(subset=[date_col], inplace=True)
     
-    # 全期損益分析 (Performance Summary)
-    total_net_profit = df_cleaned[pnl_col].sum()                   # 總淨利
-    gross_profit = profitable_trades[pnl_col].sum()                # 毛利
-    gross_loss = abs(losing_trades[pnl_col].sum())                 # 毛損 (取絕對值)
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf') # 獲利因子
-    return_on_initial_capital = (total_net_profit / initial_capital) * 100 # 報酬率
+    # 排序
+    df = df.sort_values(by=date_col).reset_index(drop=True)
+    return df, date_col, pnl_col, trade_id_col
+
+# ==========================================
+# 3. 模式一：單一報表分析 (MC 風格)
+# ==========================================
+
+def perform_single_report_analysis(df_cleaned, pnl_col, date_col, trade_id_col, initial_capital, report_title):
     
-    # 交易分析 (Trade Analysis)
-    realized_trades_count = num_winning_trades + num_losing_trades
-    percent_profitable = (num_winning_trades / realized_trades_count) * 100 if realized_trades_count > 0 else 0 # 勝率
+    # 1. 基礎數據
+    pnl_events = df_cleaned[df_cleaned[pnl_col] != 0]
     
-    avg_trade_net_profit = total_net_profit / total_trades if total_trades > 0 else 0 # 平均單筆損益
-    avg_winning_trade = gross_profit / num_winning_trades if num_winning_trades > 0 else 0 # 平均獲利交易
-    avg_losing_trade = gross_loss / num_losing_trades if num_losing_trades > 0 else 0 # 平均虧損交易
-    ratio_avg_win_avg_loss = avg_winning_trade / avg_losing_trade if avg_losing_trade > 0 else float('inf') # 平均賺賠比
+    # 計算總交易次數 (若有編號則去重，否則算筆數)
+    if trade_id_col:
+        total_trades = df_cleaned[trade_id_col].nunique()
+    else:
+        total_trades = len(pnl_events)
     
-    max_consecutive_wins, max_consecutive_losses = calculate_consecutive(pnl_events_df[pnl_col]) # 最大連勝/連敗
+    profitable = pnl_events[pnl_events[pnl_col] > 0]
+    losing = pnl_events[pnl_events[pnl_col] < 0]
     
-    # 風險分析 (Risk Analysis)
+    num_wins = len(profitable)
+    num_losses = len(losing)
+    realized_trades = num_wins + num_losses
+    win_rate = (num_wins / realized_trades * 100) if realized_trades > 0 else 0
+    
+    # 2. 損益指標
+    net_profit = df_cleaned[pnl_col].sum()
+    gross_profit = profitable[pnl_col].sum()
+    gross_loss = abs(losing[pnl_col].sum())
+    pf = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+    
+    avg_win = gross_profit / num_wins if num_wins > 0 else 0
+    avg_loss = gross_loss / num_losses if num_losses > 0 else 0
+    avg_trade = net_profit / total_trades if total_trades > 0 else 0
+    ratio_wl = avg_win / avg_loss if avg_loss > 0 else float('inf')
+    
+    # 連勝連敗
+    max_con_w, max_con_l = calculate_consecutive(pnl_events[pnl_col])
+    
+    # 3. 風險指標
     sharpe, sortino, equity_curve, volatility = calculate_risk_metrics(df_cleaned, date_col, pnl_col, initial_capital)
     
     if equity_curve is None:
-        st.error("無有效數據可計算風險指標。")
+        st.error("無法計算風險指標，請檢查日期與損益數據。")
         return
-
-    mdd_val, mdd_pct, underwater_series = calculate_drawdown_info(equity_curve)
-
-    # --- 3. 介面呈現 (MC 風格) ---
-    
-    st.header(f"策略績效報告 ({report_name})")
-    
-    # 第一區：全期損益分析
-    st.subheader("1. 全期損益分析 (Performance Summary)")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("總淨利 (Total Net Profit)", f"${total_net_profit:,.0f}")
-    col2.metric("毛利 (Gross Profit)", f"${gross_profit:,.0f}")
-    col3.metric("毛損 (Gross Loss)", f"${gross_loss:,.0f}")
-    col4.metric("獲利因子 (Profit Factor)", f"{profit_factor:.2f}")
-    col5.metric("報酬率 (Return on Capital)", f"{return_on_initial_capital:.2f}%")
-    
-    st.markdown("---")
-    
-    # 第二區：交易分析
-    st.subheader("2. 交易分析 (Trade Analysis)")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("總交易次數", f"{total_trades} 筆")
-    col2.metric("勝率 (Percent Profitable)", f"{percent_profitable:.2f}%")
-    col3.metric("平均單筆損益", f"${avg_trade_net_profit:,.0f}")
-    col4.metric("平均賺賠比 (Avg Win/Loss)", f"{ratio_avg_win_avg_loss:.2f}")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("獲利交易次數", f"{num_winning_trades}")
-    col2.metric("虧損交易次數", f"{num_losing_trades}")
-    col3.metric("最大連勝 (Max Consec. Wins)", f"{max_consecutive_wins} 次")
-    col4.metric("最大連敗 (Max Consec. Losses)", f"{max_consecutive_losses} 次")
-    
-    st.markdown("---")
-    
-    # 第三區：風險分析
-    st.subheader("3. 風險分析 (Risk Analysis)")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("最大策略回檔 ($)", f"${mdd_val:,.0f}")
-    col2.metric("最大策略回檔 (%)", f"{mdd_pct * 100:.2f}%")
-    col3.metric("夏普比率 (Sharpe Ratio)", f"{sharpe:.2f}")
-    col4.metric("年化波動率", f"{volatility * 100:.2f}%")
-    
-    st.markdown("---")
-
-    # --- 4. 圖表區 ---
-    st.header("4. 權益曲線與回檔 (Equity Curve & Drawdown)")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("權益曲線 (Equity Curve)")
-        fig1, ax1 = plt.subplots(figsize=(10, 6))
-        # 繪製包含初始資金的權益曲線
-        equity_df = equity_curve.reset_index()
-        equity_df.columns = ['日期', '資產淨值']
-        ax1.plot(equity_df['日期'], equity_df['資產淨值'], marker='', linestyle='-', color='#1f77b4', linewidth=1.5)
-        ax1.fill_between(equity_df['日期'], equity_df['資產淨值'], initial_capital, where=(equity_df['資產淨值'] >= initial_capital), facecolor='green', alpha=0.1)
-        ax1.fill_between(equity_df['日期'], equity_df['資產淨值'], initial_capital, where=(equity_df['資產淨值'] < initial_capital), facecolor='red', alpha=0.1)
-        ax1.set_title(f'策略權益曲線 (初始資金: ${initial_capital:,.0f})')
-        ax1.grid(True, linestyle='--', alpha=0.6)
-        plt.xticks(rotation=45)
-        st.pyplot(fig1)
         
-    with col2:
-        st.subheader("水下圖 (Underwater Plot)")
-        fig2, ax2 = plt.subplots(figsize=(10, 6))
-        ax2.fill_between(underwater_series.index, -underwater_series, 0, facecolor='red', alpha=0.7)
-        ax2.set_title("策略回檔 (Drawdown)")
+    mdd_val, mdd_pct, underwater = calculate_drawdown_info(equity_curve)
+    total_return = (net_profit / initial_capital) * 100
+
+    # --- 顯示報告 ---
+    st.header(f"策略績效報告 ({report_title})")
+    
+    st.subheader("1. 全期損益分析 (Performance Summary)")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("總淨利 (Net Profit)", f"${net_profit:,.0f}")
+    c2.metric("毛利 (Gross Profit)", f"${gross_profit:,.0f}")
+    c3.metric("毛損 (Gross Loss)", f"${gross_loss:,.0f}")
+    c4.metric("獲利因子 (PF)", f"{pf:.2f}")
+    c5.metric("總報酬率 (ROI)", f"{total_return:.2f}%")
+    
+    st.markdown("---")
+    
+    st.subheader("2. 交易分析 (Trade Analysis)")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("總交易次數", f"{total_trades}")
+    c2.metric("勝率 (Win Rate)", f"{win_rate:.2f}%")
+    c3.metric("平均單筆損益", f"${avg_trade:,.0f}")
+    c4.metric("平均賺賠比", f"{ratio_wl:.2f}")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("獲利次數", f"{num_wins}")
+    c2.metric("虧損次數", f"{num_losses}")
+    c3.metric("最大連勝", f"{max_con_w} 次")
+    c4.metric("最大連敗", f"{max_con_l} 次")
+    
+    st.markdown("---")
+    
+    st.subheader("3. 風險分析 (Risk Analysis)")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("夏普比率 (Sharpe)", f"{sharpe:.2f}")
+    c2.metric("風報比 (Sortino)", f"{sortino:.2f}")
+    c3.metric("年化波動率", f"{volatility*100:.2f}%")
+    c4.metric("最大策略回檔 ($)", f"${mdd_val:,.0f}")
+    
+    # 補上 MDD%
+    c1, c2 = st.columns(2)
+    c1.metric("最大策略回檔 (%)", f"{mdd_pct*100:.2f}%")
+    
+    st.markdown("---")
+
+    # --- 圖表 ---
+    st.subheader("4. 權益曲線與回檔")
+    c1, c2 = st.columns(2)
+    with c1:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        eq_df = equity_curve.reset_index()
+        eq_df.columns = ['Date', 'Equity']
+        ax.plot(eq_df['Date'], eq_df['Equity'], color='#1f77b4', linewidth=1.5)
+        # 標示初始資金線
+        ax.axhline(y=initial_capital, color='gray', linestyle='--', alpha=0.5)
+        ax.fill_between(eq_df['Date'], eq_df['Equity'], initial_capital, where=(eq_df['Equity'] >= initial_capital), facecolor='green', alpha=0.1)
+        ax.fill_between(eq_df['Date'], eq_df['Equity'], initial_capital, where=(eq_df['Equity'] < initial_capital), facecolor='red', alpha=0.1)
+        ax.set_title(f"權益曲線 (初始: ${initial_capital:,.0f})")
+        ax.grid(True, linestyle='--', alpha=0.5)
+        st.pyplot(fig)
+    
+    with c2:
+        fig2, ax2 = plt.subplots(figsize=(10, 5))
+        ax2.fill_between(underwater.index, -underwater, 0, facecolor='red', alpha=0.7)
+        ax2.set_title("水下圖 (Drawdown)")
         ax2.set_ylabel("回檔金額 ($)")
-        ax2.grid(True, linestyle='--', alpha=0.6)
-        plt.xticks(rotation=45)
+        ax2.grid(True, linestyle='--', alpha=0.5)
         st.pyplot(fig2)
 
     st.markdown("---")
     
-    # --- 5. 蒙地卡羅模擬 ---
-    st.header("5. 蒙地卡羅分析 (Monte Carlo Analysis)")
-    st.write("透過隨機重組交易順序，評估策略在不同運氣下的表現。")
-    
-    mc_pnl_source = pnl_events_df[pnl_col]
-    # 期貨用 pnl_events_df 的長度作為交易次數較為準確(不含空交易日)
-    mc_trade_count = len(pnl_events_df) 
-    real_curve = pnl_events_df[pnl_col].cumsum().reset_index(drop=True)
+    # --- 蒙地卡羅 ---
+    st.subheader("5. 蒙地卡羅模擬 (Monte Carlo)")
+    n_sims = st.number_input("模擬次數", 100, 5000, 1000, 100)
+    if st.button(f"執行 {n_sims} 次模擬"):
+        with st.spinner("模擬運算中..."):
+            sim_df, final_eq = run_monte_carlo_simulation(pnl_events[pnl_col], n_sims, len(pnl_events))
+            
+            fig3, ax3 = plt.subplots(figsize=(12, 6))
+            ax3.plot(sim_df, color='lightblue', alpha=0.05)
+            # 原始曲線
+            original_curve = pnl_events[pnl_col].cumsum().reset_index(drop=True)
+            ax3.plot(original_curve, color='red', linewidth=2, label="原始策略")
+            ax3.set_title("蒙地卡羅路徑")
+            ax3.legend()
+            st.pyplot(fig3)
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("原始結存", f"${net_profit:,.0f}")
+            c2.metric("模擬中位數", f"${final_eq.median():,.0f}")
+            c3.metric("5% 最差結存", f"${final_eq.quantile(0.05):,.0f}")
 
-    if mc_pnl_source.empty:
-        st.warning("沒有足夠的損益數據來執行蒙地卡羅模擬。")
+# ==========================================
+# 4. 模式二：最佳化分析 (Batch Optimization)
+# ==========================================
+
+def parse_filename_params(filename):
+    """
+    從檔名解析參數。
+    邏輯：抓取檔名中的所有數字。
+    預設第1個數字為 Param1，第2個為 Param2。
+    """
+    name_no_ext = os.path.splitext(filename)[0]
+    # 抓取整數或小數
+    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", name_no_ext)
+    params = {}
+    if numbers:
+        params['Param1'] = float(numbers[0])
+        if len(numbers) > 1:
+            params['Param2'] = float(numbers[1])
     else:
-        n_sims = st.number_input("請選擇模擬次數：", min_value=100, max_value=5000, value=1000, step=100)
+        params['Param1'] = name_no_ext # 無數字則用檔名
+    return params
+
+def analyze_optimization_batch(uploaded_files, initial_capital):
+    
+    results = []
+    progress_bar = st.progress(0)
+    
+    st.info(f"正在分析 {len(uploaded_files)} 個檔案...")
+    
+    for i, file in enumerate(uploaded_files):
+        # 1. 讀取
+        df = load_data(file)
+        if df is None: continue
         
-        if st.button(f"開始執行 {n_sims} 次模擬"):
-            with st.spinner(f"正在執行 {n_sims} 次模擬，請稍候..."):
-                sim_df, final_equities = run_monte_carlo_simulation(mc_pnl_source, n_sims, mc_trade_count)
-                
-                st.subheader(f"{n_sims} 次模擬 - 權益曲線堆疊圖")
-                fig3, ax3 = plt.subplots(figsize=(12, 6))
-                # 畫模擬線 (淡藍色)
-                ax3.plot(sim_df, color='lightblue', alpha=0.05)
-                # 畫真實線 (紅色)
-                ax3.plot(real_curve, color='red', linewidth=2, label=f"原始策略 (結存: ${total_net_profit:,.0f})")
-                ax3.set_title("蒙地卡羅模擬 vs 原始策略")
-                ax3.set_xlabel("交易次數")
-                ax3.set_ylabel("累積損益 ($)")
-                ax3.legend()
-                ax3.grid(True, linestyle='--')
-                st.pyplot(fig3)
-                
-                st.subheader("模擬統計摘要")
-                median_final = final_equities.median()
-                pct_5 = final_equities.quantile(0.05)
-                pct_95 = final_equities.quantile(0.95)
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("原始策略結存", f"${total_net_profit:,.0f}")
-                col2.metric("模擬中位數結存", f"${median_final:,.0f}")
-                col3.metric("5% 最差情境 (95%信心)", f"${pct_5:,.0f}")
-                
-                if total_net_profit > pct_5:
-                    st.success("您的原始績效位於模擬結果的 95% 信心區間之上，顯示策略具有顯著優勢。")
-                else:
-                    st.warning("您的原始績效接近最差的 5% 模擬結果，請注意策略可能存在過度擬合或運氣成分。")
-
-
-# --- 數據讀取與清理函式 ---
-
-def analyze_stock_data(df, initial_capital):
-    df_cleaned = df.copy()
-    df_cleaned.columns = df_cleaned.columns.str.strip().str.replace('"', '').str.strip()
-    
-    # 必要的欄位檢查
-    required_cols = ['交易日期', '股票名稱', '損益金額', '序號', '報酬率']
-    missing_cols = [col for col in required_cols if col not in df_cleaned.columns]
-    if missing_cols:
-        st.error(f"上傳的個股報表缺少必要欄位：`{', '.join(missing_cols)}`")
+        # 2. 清理與識別
+        df_clean, date_col, pnl_col, trade_id_col = preprocess_xq_data(df)
+        if df_clean is None: continue
+        
+        # 3. 計算核心指標
+        net_profit = df_clean[pnl_col].sum()
+        total_trades = df_clean[trade_id_col].nunique() if trade_id_col else len(df_clean[df_clean[pnl_col]!=0])
+        
+        sharpe, sortino, equity, vol = calculate_risk_metrics(df_clean, date_col, pnl_col, initial_capital)
+        mdd_val, mdd_pct, _ = calculate_drawdown_info(equity) if equity is not None else (0, 0, None)
+        
+        # 4. 解析參數
+        params = parse_filename_params(file.name)
+        
+        # 5. 存入列表
+        record = {
+            'Filename': file.name,
+            'Net Profit': net_profit,
+            'Sharpe': sharpe,
+            'MDD %': mdd_pct * 100,
+            'Trades': total_trades,
+            'Win Rate': 0 # 簡化，暫不計算
+        }
+        record.update(params)
+        results.append(record)
+        
+        progress_bar.progress((i + 1) / len(uploaded_files))
+        
+    if not results:
+        st.error("無法讀取任何有效數據，請檢查檔案格式。")
         return
 
-    # 數據轉換
-    df_cleaned['交易日期'] = pd.to_datetime(df_cleaned['交易日期'], errors='coerce')
-    df_cleaned['損益金額'] = pd.to_numeric(df_cleaned['損益金額'].astype(str).str.strip(), errors='coerce').fillna(0)
-    df_cleaned['序號'] = pd.to_numeric(df_cleaned['序號'].astype(str).str.strip(), errors='coerce')
-    df_cleaned.dropna(subset=['交易日期'], inplace=True)
-    df_cleaned = df_cleaned.sort_values(by='交易日期').reset_index(drop=True)
+    res_df = pd.DataFrame(results)
     
-    # 呼叫通用 MC 分析引擎
-    # 個股報表通常 '序號' 就是交易次數計數器
-    perform_mc_style_analysis(df_cleaned, '損益金額', '交易日期', '序號', initial_capital, "個股")
-
-
-def analyze_futures_data(df, initial_capital):
-    df_cleaned = df.copy()
-    df_cleaned.columns = df_cleaned.columns.str.strip().str.replace('"', '').str.strip()
+    # --- 顯示最佳化報告 ---
+    st.header("🔬 策略最佳化分析 (Optimization Report)")
     
-    required_cols = ['交易日期', '商品名稱', '筆數', '淨損益']
-    missing_cols = [col for col in required_cols if col not in df_cleaned.columns]
-    if missing_cols:
-        st.error(f"上傳的期貨報表缺少必要欄位：`{', '.join(missing_cols)}`")
-        return
-
-    df_cleaned['交易日期'] = pd.to_datetime(df_cleaned['交易日期'], errors='coerce')
-    # 期貨報表可能有空白列，筆數和淨損益需轉數值
-    for col in ['筆數', '淨損益']:
-        df_cleaned[col] = pd.to_numeric(df_cleaned[col].astype(str).str.strip(), errors='coerce')
+    # 1. 參數高原圖
+    st.subheader("1. 參數高原分析 (Parameter Plateau)")
     
-    df_cleaned.dropna(subset=['交易日期'], inplace=True)
-    df_cleaned['淨損益'] = df_cleaned['淨損益'].fillna(0)
+    c1, c2 = st.columns(2)
+    x_axis = c1.selectbox("選擇 X 軸 (參數)", ['Param1', 'Param2'] if 'Param2' in res_df.columns else ['Param1'])
+    y_axis = c2.selectbox("選擇 Y 軸 (績效)", ['Net Profit', 'Sharpe', 'MDD %'])
     
-    # 呼叫通用 MC 分析引擎
-    # 期貨報表 '筆數' 是交易ID
-    perform_mc_style_analysis(df_cleaned, '淨損益', '交易日期', '筆數', initial_capital, "期貨")
+    # 排序
+    chart_data = res_df.sort_values(by=x_axis)
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # 判斷是否為 2D 熱力圖需求 (若有 Param2 且選 Param1 為 X)
+    if 'Param2' in res_df.columns and x_axis == 'Param1':
+        # 散佈圖 (顏色代表績效)
+        sc = ax.scatter(chart_data[x_axis], chart_data['Param2'], c=chart_data[y_axis], cmap='viridis', s=150, edgecolors='black')
+        plt.colorbar(sc, label=y_axis)
+        ax.set_ylabel("Param2")
+        ax.set_title(f"{y_axis} Heatmap (Param1 vs Param2)")
+    else:
+        # 單參數折線圖
+        ax.plot(chart_data[x_axis], chart_data[y_axis], marker='o', linestyle='-', color='#1f77b4', linewidth=2)
+        # 標示最高點
+        max_idx = chart_data[y_axis].idxmax()
+        ax.annotate(f'Max: {chart_data.loc[max_idx, y_axis]:.2f}', 
+                    xy=(chart_data.loc[max_idx, x_axis], chart_data.loc[max_idx, y_axis]),
+                    xytext=(10, 10), textcoords='offset points', arrowprops=dict(arrowstyle='->', color='red'))
+        ax.set_ylabel(y_axis)
+        ax.set_title(f"{y_axis} vs {x_axis}")
+
+    ax.set_xlabel(x_axis)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    st.pyplot(fig)
+    
+    # 2. 詳細數據表
+    st.subheader("2. 詳細數據列表")
+    # 高亮顯示較好的數值
+    st.dataframe(res_df.style.background_gradient(subset=['Net Profit', 'Sharpe'], cmap='Greens'))
+    
+    # 3. 最佳參數
+    best = res_df.loc[res_df['Net Profit'].idxmax()]
+    st.success(f"🏆 最佳淨利參數: {best[x_axis]} (淨利: ${best['Net Profit']:,.0f}, 夏普: {best['Sharpe']:.2f})")
 
 
-# --- 網頁主體 v8.0 (MC 風格版) ---
-st.title("📊 交易損益分析工具 v8.0 (MC風格版)")
+# ==========================================
+# 5. 主程式入口
+# ==========================================
 
-st.subheader("1. 設定與報表類型：")
+st.title("📊 交易損益分析工具 v9.0")
 
+st.subheader("1. 設定與模式")
 col1, col2 = st.columns([1, 2])
 with col1:
-    initial_capital = st.number_input("請輸入初始資金 (元)", min_value=10000, value=3000000, step=10000)
+    initial_capital = st.number_input("初始資金 (Initial Capital)", value=3000000, step=10000)
 with col2:
-    report_type = st.radio(
-        "選擇報表類型",
-        ["個股交易報表 (已總結)", "期貨交易報表 (逐筆)"],
-        horizontal=True
-    )
+    mode = st.radio("選擇功能模式", ["單一報表分析 (MC風格)", "XQ 策略最佳化 (批次CSV)"], horizontal=True)
 
 st.markdown("---")
 
-st.subheader("2. 請上傳您的 Excel 或 CSV 報表：")
-uploaded_file = st.file_uploader(
-    "選擇一個 Excel 或 CSV 檔案",
-    type=["xlsx", "xls", "csv"],
-    label_visibility="collapsed"
-)
-
-if uploaded_file is not None:
-    try:
-        dataframe = None 
-        if uploaded_file.name.endswith('.csv'):
-            uploaded_file.seek(0)
-            # 嘗試多種編碼讀取 CSV
-            encodings = ['utf-8', 'utf-8-sig', 'cp950', 'big5']
-            for enc in encodings:
-                try:
-                    dataframe = pd.read_csv(uploaded_file, encoding=enc)
-                    uploaded_file.seek(0)
-                    break
-                except UnicodeDecodeError:
-                    uploaded_file.seek(0)
-                    continue
-        else:
-            dataframe = pd.read_excel(uploaded_file)
-        
-        st.markdown("---")
-        
-        if dataframe is None:
-            st.error("讀取檔案失敗。請確認 CSV 編碼格式。")
-        else:
-            if report_type == "個股交易報表 (已總結)":
-                analyze_stock_data(dataframe, initial_capital)
+if mode == "單一報表分析 (MC風格)":
+    st.subheader("2. 上傳單一報表 (Excel/CSV)")
+    file = st.file_uploader("選擇檔案", type=["xlsx", "xls", "csv"])
+    if file:
+        df = load_data(file)
+        if df is not None:
+            df_clean, date_col, pnl_col, trade_id_col = preprocess_xq_data(df)
+            if df_clean is not None:
+                r_type = "期貨" if '筆數' in df.columns else "個股"
+                perform_single_report_analysis(df_clean, pnl_col, date_col, trade_id_col, initial_capital, r_type)
             else:
-                analyze_futures_data(dataframe, initial_capital)
-            
-    except Exception as e:
-        st.error(f"讀取或分析檔案時發生錯誤：{e}")
+                st.error("格式無法識別，請確認是否為 XQ 匯出的交易明細。")
+        else:
+            st.error("檔案讀取失敗。")
+
+else: # 最佳化模式
+    st.subheader("2. 批次上傳多個回測 CSV")
+    st.info("💡 提示：請將檔名命名為 `參數1_參數2.csv` (例如 `MA_60.csv` 或 `MA60_Stop20.csv`)，程式會自動抓取數字作為參數。")
+    files = st.file_uploader("選擇多個檔案 (可拖曳)", type=["csv"], accept_multiple_files=True)
+    
+    if files:
+        analyze_optimization_batch(files, initial_capital)
