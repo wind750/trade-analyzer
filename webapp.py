@@ -11,7 +11,7 @@ import os
 # 0. 網頁與環境設定
 # ==========================================
 st.set_page_config(
-    page_title="交易損益分析工具 v9.3 (多工作表搜尋版)",
+    page_title="交易損益分析工具 v9.5 (欄位適配版)",
     page_icon="📊",
     layout="wide"
 )
@@ -90,16 +90,16 @@ def calculate_risk_metrics(df, date_col, pnl_col, initial_capital):
     return sharpe_ratio, sortino_ratio, equity_curve, annualized_volatility
 
 # ==========================================
-# 2. 資料讀取與前處理 (v9.3 多Sheet搜尋)
+# 2. 資料讀取與前處理 (v9.5 支援「獲利金額」欄位)
 # ==========================================
 
 def find_header_and_clean(df):
     """
-    智慧搜尋標題列 (往下掃描 30 行)
+    智慧搜尋標題列
     """
     header_idx = -1
-    # 檢查是否包含關鍵欄位
-    target_cols = ['交易日期', '日期', 'Date']
+    # ★ v9.5 新增支援 '序號'
+    target_cols = ['交易日期', '日期', 'Date', '進場時間', '出場時間', '序號']
     
     # 1. 檢查當前 column
     current_cols = df.columns.astype(str).str.strip().str.replace('"', '')
@@ -124,21 +124,19 @@ def find_header_and_clean(df):
 
 def check_if_trade_data(df):
     """
-    檢查這個 DataFrame 是否像是一個交易明細表
-    條件：必須有 '交易日期' 且 (有 '淨損益' 或 '損益金額')
+    檢查是否為交易明細表
     """
     if df is None: return False
     cols = df.columns
-    has_date = '交易日期' in cols
-    has_pnl = ('淨損益' in cols) or ('損益金額' in cols)
+    # ★ v9.5：支援 '獲利金額'
+    has_date = ('交易日期' in cols) or ('進場時間' in cols) or ('出場時間' in cols)
+    has_pnl = ('淨損益' in cols) or ('損益金額' in cols) or ('獲利金額' in cols)
     return has_date and has_pnl
 
 def load_data_smart(uploaded_file):
-    """
-    ★ v9.3 核心：讀取檔案，如果是 Excel，會遍歷所有 Sheet 尋找交易明細
-    """
+    """讀取檔案 (CSV/Excel + 智慧標題搜尋)"""
     try:
-        # --- CSV 處理 ---
+        # CSV
         if uploaded_file.name.lower().endswith('.csv'):
             uploaded_file.seek(0)
             encodings = ['utf-8', 'utf-8-sig', 'cp950', 'big5']
@@ -146,34 +144,27 @@ def load_data_smart(uploaded_file):
                 try:
                     df = pd.read_csv(uploaded_file, encoding=enc)
                     uploaded_file.seek(0)
-                    # 嘗試清理並檢查
                     df_clean = find_header_and_clean(df)
                     if check_if_trade_data(df_clean):
-                        return df_clean # 找到正確資料
+                        return df_clean
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)
                     continue
             return None
 
-        # --- Excel 處理 (多 Sheet 掃描) ---
+        # Excel
         else:
             excel_file = pd.ExcelFile(uploaded_file)
             sheet_names = excel_file.sheet_names
             
-            # 遍歷每一個 Sheet
             for sheet in sheet_names:
                 try:
                     df = pd.read_excel(uploaded_file, sheet_name=sheet)
-                    # 嘗試清理並尋找標題
                     df_clean = find_header_and_clean(df)
-                    # 檢查這張表是否包含我們需要的欄位
                     if check_if_trade_data(df_clean):
-                        # print(f"Found trade data in sheet: {sheet}") # Debug用
                         return df_clean
                 except Exception:
                     continue
-            
-            # 如果都沒找到，回傳 None
             return None
 
     except Exception:
@@ -181,18 +172,36 @@ def load_data_smart(uploaded_file):
 
 def preprocess_xq_data(df):
     """
-    最後處理：確認欄位對應
-    注意：傳入的 df 應該已經是經過 load_data_smart 清理過標題的 df
+    ★ v9.5 核心：支援 '獲利金額', '進場時間', '序號'
     """
     if df is None: return None, None, None, None
 
     df.columns = df.columns.str.strip()
     
-    if '筆數' in df.columns and '淨損益' in df.columns:
-        date_col, pnl_col, trade_id_col = '交易日期', '淨損益', '筆數'
+    # 1. 處理日期欄位 (優先使用進場時間)
+    if '進場時間' in df.columns:
+        df['交易日期'] = df['進場時間']
+    elif '出場時間' in df.columns:
+        df['交易日期'] = df['出場時間']
+    
+    # 2. 判斷格式與欄位對應
+    if '淨損益' in df.columns:
+        date_col = '交易日期'
+        pnl_col = '淨損益'
+        if '筆數' in df.columns: trade_id_col = '筆數'
+        elif '編號' in df.columns: trade_id_col = '編號'
+        else: trade_id_col = None
+            
     elif '損益金額' in df.columns:
         date_col, pnl_col = '交易日期', '損益金額'
         trade_id_col = '序號' if '序號' in df.columns else None
+        
+    # ★ v9.5 新增：支援您的回測報告格式 ('獲利金額', '序號')
+    elif '獲利金額' in df.columns:
+        date_col = '交易日期'
+        pnl_col = '獲利金額'
+        trade_id_col = '序號' if '序號' in df.columns else None
+        
     else:
         return None, None, None, None
 
@@ -342,12 +351,9 @@ def analyze_optimization_batch(uploaded_files, initial_capital):
     st.info(f"正在分析 {len(uploaded_files)} 個檔案...")
     
     for i, file in enumerate(uploaded_files):
-        # ★ v9.3 使用智慧讀取 (load_data_smart)
         df_clean = load_data_smart(file)
-        
         if df_clean is None: continue
         
-        # 再次檢查欄位 (以防萬一)
         df_ready, date_col, pnl_col, trade_id_col = preprocess_xq_data(df_clean)
         if df_ready is None: continue
         
@@ -371,7 +377,7 @@ def analyze_optimization_batch(uploaded_files, initial_capital):
         progress_bar.progress((i + 1) / len(uploaded_files))
         
     if not results:
-        st.error("無法讀取有效數據。程式已嘗試掃描 Excel 的所有工作表 (Sheet)，仍未找到包含『交易日期』與『損益』的表格。")
+        st.error("無法讀取有效數據。請確認檔案內容包含『進場時間』與『獲利金額』。")
         return
 
     res_df = pd.DataFrame(results)
@@ -416,7 +422,7 @@ def analyze_optimization_batch(uploaded_files, initial_capital):
 # 5. 主程式入口
 # ==========================================
 
-st.title("📊 交易損益分析工具 v9.3 (多工作表搜尋版)")
+st.title("📊 交易損益分析工具 v9.5 (欄位適配版)")
 
 st.subheader("1. 設定與模式")
 col1, col2 = st.columns([1, 2])
@@ -431,19 +437,16 @@ if mode == "單一報表分析 (MC風格)":
     st.subheader("2. 上傳單一報表 (Excel/CSV)")
     file = st.file_uploader("選擇檔案", type=["xlsx", "xls", "csv"])
     if file:
-        # ★ v9.3 使用智慧讀取 (load_data_smart)
-        df_clean = load_data_smart(file)
-        
-        if df_clean is not None:
-            # 再次經過預處理確認欄位
-            df_ready, date_col, pnl_col, trade_id_col = preprocess_xq_data(df_clean)
-            if df_ready is not None:
-                r_type = "期貨" if '筆數' in df_ready.columns else "個股"
-                perform_single_report_analysis(df_ready, pnl_col, date_col, trade_id_col, initial_capital, r_type)
+        df = load_data_smart(file)
+        if df is not None:
+            df_clean, date_col, pnl_col, trade_id_col = preprocess_xq_data(df)
+            if df_clean is not None:
+                # 這裡統稱為 "回測報告" 即可
+                perform_single_report_analysis(df_clean, pnl_col, date_col, trade_id_col, initial_capital, "XQ/券商")
             else:
-                st.error("找到的工作表內容無法識別。請確認包含「交易日期」與「淨損益」等欄位。")
+                st.error("欄位無法識別，請確認檔案包含「獲利金額」與「進場時間/交易日期」。")
         else:
-            st.error("讀取失敗：無法在 Excel 的任何工作表中找到交易明細。")
+            st.error("讀取失敗：無法在檔案中找到交易明細表。")
 
 else: # 最佳化模式
     st.subheader("2. 批次上傳多個回測報表 (Excel/CSV)")
