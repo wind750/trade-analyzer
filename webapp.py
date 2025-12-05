@@ -442,7 +442,7 @@ if mode == "單一報表分析 (MC風格)":
             df_clean, date_col, pnl_col, trade_id_col = preprocess_xq_data(df)
             if df_clean is not None:
                 # 這裡統稱為 "回測報告" 即可
-                perform_single_report_analysis(df_clean, pnl_col, date_col, trade_id_col, initial_capital, "XQ/券商")
+                perform_single_report_analysis(df_clean, pnl_col, date_col, trade_id_col, initial_capital, "券商")
             else:
                 st.error("欄位無法識別，請確認檔案包含「獲利金額」與「進場時間/交易日期」。")
         else:
@@ -455,3 +455,4 @@ else: # 最佳化模式
     
     if files:
         analyze_optimization_batch(files, initial_capital)
+
