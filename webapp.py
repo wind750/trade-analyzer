@@ -311,62 +311,66 @@ def perform_single_report_analysis(df_cleaned, pnl_col, date_col, trade_id_col, 
         st.pyplot(fig2)
 
     # ==========================================
-    # 在 4. 權益曲線與回檔 的區塊之後，加入以下程式碼
+    # 5. 每月損益分佈 (視覺優化版)
     # ==========================================
     
     st.markdown("---")
     st.subheader("5. 每月損益分佈")
     
-    # 1. 資料前處理：按月分群加總
-    # 確保資料中包含有效的日期欄位，並將其設為 Index 以利重新取樣
+    # 確保此區塊再次套用中文字體設定，解決標題與 Y 軸出現方塊（豆腐塊）的問題
+    plt.rcParams['font.sans-serif'] = [CHINESE_FONT, 'sans-serif']
+    plt.rcParams['axes.unicode_minus'] = False
+
     if not df_cleaned.empty and date_col in df_cleaned.columns:
         df_monthly_calc = df_cleaned.copy()
         df_monthly_calc.set_index(date_col, inplace=True)
         
-        # 使用 'ME' (Month End) 進行重新取樣，加總每月的損益金額
         try:
             monthly_pnl = df_monthly_calc[pnl_col].resample('ME').sum()
         except ValueError:
-            # 兼容舊版 Pandas
             monthly_pnl = df_monthly_calc[pnl_col].resample('M').sum()
             
-        # 過濾掉沒有交易的空白月份（可選，若希望保留時間連續性可將此行註解）
         monthly_pnl = monthly_pnl[monthly_pnl != 0]
-        
-        # 將 Index 轉為 'YYYY-MM' 的字串格式，讓 X 軸顯示更美觀
         monthly_pnl.index = monthly_pnl.index.strftime('%Y-%m')
         
-        # 2. 繪製長條圖
         if not monthly_pnl.empty:
-            fig_monthly, ax_monthly = plt.subplots(figsize=(12, 5))
+            # 【優化 1】：動態圖表寬度。根據月份數量自動延伸寬度，避免標籤與柱體過度擠壓
+            fig_width = max(14, len(monthly_pnl) * 0.4) 
+            fig_monthly, ax_monthly = plt.subplots(figsize=(fig_width, 6))
             
-            # 設定顏色條件：大於等於 0 為綠色，小於 0 為紅色
             colors = ['#2ca02c' if val >= 0 else '#d62728' for val in monthly_pnl]
             
-            # 繪製 Bar Chart
-            bars = ax_monthly.bar(monthly_pnl.index, monthly_pnl, color=colors, alpha=0.8)
+            # 【優化 2】：改用 np.arange 產生精確的數值座標，確保柱體位置與 X 軸刻度絕對對齊
+            x_pos = np.arange(len(monthly_pnl))
+            bars = ax_monthly.bar(x_pos, monthly_pnl, color=colors, alpha=0.85, width=0.6)
             
-            # 畫一條 y=0 的黑色基準線
             ax_monthly.axhline(0, color='black', linewidth=1.2)
             
-            # 圖表美化設定
-            ax_monthly.set_title("每月淨損益長條圖", fontsize=14, pad=15)
+            ax_monthly.set_title("每月淨損益分佈", fontsize=16, pad=15)
             ax_monthly.set_ylabel("淨損益金額 ($)", fontsize=12)
-            ax_monthly.tick_params(axis='x', rotation=45) # X 軸標籤旋轉 45 度避免重疊
-            ax_monthly.grid(axis='y', linestyle='--', alpha=0.4)
             
-            # 在長條圖上方/下方標註具體數字
-            for bar in bars:
+            # 【優化 3】：設定 X 軸刻度，並加入 ha='right'，讓旋轉後的文字右上角精準指向刻度中心
+            ax_monthly.set_xticks(x_pos)
+            ax_monthly.set_xticklabels(monthly_pnl.index, rotation=45, ha='right', fontsize=10)
+            
+            ax_monthly.grid(axis='y', linestyle='--', alpha=0.3)
+            
+            # 【優化 4】：動態計算數值標籤的垂直偏移量，避免數值太小時擠在零軸線上
+            max_val = monthly_pnl.abs().max()
+            y_offset = max_val * 0.02 # 根據圖表最大值設定 2% 的安全距離
+            
+            for bar, val in zip(bars, monthly_pnl):
                 height = bar.get_height()
-                # 判斷文字位置，正值在柱子上方，負值在柱子下方
                 va_align = 'bottom' if height >= 0 else 'top'
-                y_offset = height + (height * 0.02) if height >= 0 else height - (abs(height) * 0.02)
                 
-                ax_monthly.text(bar.get_x() + bar.get_width()/2., y_offset,
-                                f'{height:,.0f}',
+                # 給予正值向上偏移，負值向下偏移
+                y_text_pos = height + y_offset if height >= 0 else height - y_offset
+                
+                ax_monthly.text(bar.get_x() + bar.get_width()/2., y_text_pos,
+                                f'{val:,.0f}',
                                 ha='center', va=va_align, fontsize=9, color='#333333')
             
-            # 調整佈局並顯示在 Streamlit 上
+            # 自動收緊邊界
             plt.tight_layout()
             st.pyplot(fig_monthly)
         else:
