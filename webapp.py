@@ -310,6 +310,70 @@ def perform_single_report_analysis(df_cleaned, pnl_col, date_col, trade_id_col, 
         ax2.grid(True, linestyle='--', alpha=0.5)
         st.pyplot(fig2)
 
+    # ==========================================
+    # 在 4. 權益曲線與回檔 的區塊之後，加入以下程式碼
+    # ==========================================
+    
+    st.markdown("---")
+    st.subheader("5. 每月損益分佈")
+    
+    # 1. 資料前處理：按月分群加總
+    # 確保資料中包含有效的日期欄位，並將其設為 Index 以利重新取樣
+    if not df_cleaned.empty and date_col in df_cleaned.columns:
+        df_monthly_calc = df_cleaned.copy()
+        df_monthly_calc.set_index(date_col, inplace=True)
+        
+        # 使用 'ME' (Month End) 進行重新取樣，加總每月的損益金額
+        try:
+            monthly_pnl = df_monthly_calc[pnl_col].resample('ME').sum()
+        except ValueError:
+            # 兼容舊版 Pandas
+            monthly_pnl = df_monthly_calc[pnl_col].resample('M').sum()
+            
+        # 過濾掉沒有交易的空白月份（可選，若希望保留時間連續性可將此行註解）
+        monthly_pnl = monthly_pnl[monthly_pnl != 0]
+        
+        # 將 Index 轉為 'YYYY-MM' 的字串格式，讓 X 軸顯示更美觀
+        monthly_pnl.index = monthly_pnl.index.strftime('%Y-%m')
+        
+        # 2. 繪製長條圖
+        if not monthly_pnl.empty:
+            fig_monthly, ax_monthly = plt.subplots(figsize=(12, 5))
+            
+            # 設定顏色條件：大於等於 0 為綠色，小於 0 為紅色
+            colors = ['#2ca02c' if val >= 0 else '#d62728' for val in monthly_pnl]
+            
+            # 繪製 Bar Chart
+            bars = ax_monthly.bar(monthly_pnl.index, monthly_pnl, color=colors, alpha=0.8)
+            
+            # 畫一條 y=0 的黑色基準線
+            ax_monthly.axhline(0, color='black', linewidth=1.2)
+            
+            # 圖表美化設定
+            ax_monthly.set_title("每月淨損益長條圖", fontsize=14, pad=15)
+            ax_monthly.set_ylabel("淨損益金額 ($)", fontsize=12)
+            ax_monthly.tick_params(axis='x', rotation=45) # X 軸標籤旋轉 45 度避免重疊
+            ax_monthly.grid(axis='y', linestyle='--', alpha=0.4)
+            
+            # 在長條圖上方/下方標註具體數字
+            for bar in bars:
+                height = bar.get_height()
+                # 判斷文字位置，正值在柱子上方，負值在柱子下方
+                va_align = 'bottom' if height >= 0 else 'top'
+                y_offset = height + (height * 0.02) if height >= 0 else height - (abs(height) * 0.02)
+                
+                ax_monthly.text(bar.get_x() + bar.get_width()/2., y_offset,
+                                f'{height:,.0f}',
+                                ha='center', va=va_align, fontsize=9, color='#333333')
+            
+            # 調整佈局並顯示在 Streamlit 上
+            plt.tight_layout()
+            st.pyplot(fig_monthly)
+        else:
+            st.info("該期間內無足夠的逐月交易資料可供繪製。")
+    else:
+        st.warning("無法解析日期欄位，無法繪製每月損益圖。")
+
     st.markdown("---")
     st.subheader("5. 蒙地卡羅模擬")
     n_sims = st.number_input("模擬次數", 100, 5000, 1000, 100)
